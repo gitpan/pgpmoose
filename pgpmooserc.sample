@@ -1,0 +1,6 @@
+$NAME      = 'Vlad <pgpmoose@killfile.org>';    # Bot name, for the cancels
+$NEWSRC    = "$ENV{'HOME'}/.newsrc.pgp";        # The newsrc file to use
+$SERVER    = "news.killfile.org";               # Default news server
+$CANCELDIR = "$ENV{'HOME'}/pgpmoose/cancels";   # Where to store the cancels?
+$TESTING   = 0;                                 # Don't issue the cancels?
+$ARTS      = 200;                               # How many articles at a time?

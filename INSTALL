@@ -1,0 +1,33 @@
+PGPMoose is a program for scanning a newsgroup and deleting any posts
+that were not signed by the moderator.  Instructions are available by 
+running 'pgpmoose -h'.
+
+INSTALLATION
+============
+
+Requirements:
+
+  - A Unix-based system (it may work under Windows, but I doubt it)
+  - Perl 5 or higher - http://www.perl.org/
+  - NewsLib - http://www.killfile.org/~tskirvin/software/newslib/ 
+      requires News::Article, Net::NNTP, and PGP::Sign, all of which 
+      are available on CPAN - http://www.cpan.org/
+  - GnuPG - http://www.gnupg.org/ (or similar PGP-type program)
+
+Instructions:
+
+-1. Make sure you're the moderator of the groups you've said you're
+    moderating, and that all outgoing posts have a valid attached PGP
+    signature.  You may want to do this with the pgp_sign() function 
+    in the News::Article module.  
+0.  Find a news server that accepts cancels and will let you inject your
+    posts into them.  Make sure that you've asked specifically!  
+1.  Customize the script by hand to match your local system.
+2.  Retrieve the PGP signature for the groups you're following.  Enter
+    them into your keyring.
+3.  Set up the newsgroup you want to use with 'pgpmoose -s GROUP'
+4.  Make some test runs with 'pgpmoose -t', to make sure only the posts
+    that should be cancelled are cancelled.
+5.  Put the regular program into your crontab, running every so often
+    (nightly or twice-daily is recommended).  Review the logs in your
+    email.

@@ -1,0 +1,344 @@
+#!/usr/local/bin/perl -w
+# -*- Perl -*- Thu Apr 22 10:29:15 CDT 2004 
+#############################################################################
+# Written by Tim Skirvin <tskirvin@killfile.org>.
+# Copyright 1999-2004 Tim Skirvin.  Redistribution terms are below.
+#
+# As noted in the documentation, I hold no responsibility for how you use 
+# this program, but I would apprecaite it if you didn't abuse it.
+#############################################################################
+use vars qw ( $VERSION );   $VERSION = "1.0";	
+
+###############################################################################
+### Default Configuration #####################################################
+###############################################################################
+use vars qw( $LOCALCONF $NAME $NEWSRC $SERVER $CANCELDIR $TESTING $ARTS );
+
+## Rather than having everything in this shared configuration, load this
+## file to get additional configuration.  This file contains additional
+## perl.  
+
+$LOCALCONF  = "$ENV{'HOME'}/.pgpmooserc";
+
+## Default 'bot name; this needs to be overwritten
+
+$NAME       = "Yourname <email\@yoursite.com.invalid>";	
+
+## The default newsrc file to use.  This will be created if non-existant.
+$NEWSRC     = "$ENV{'HOME'}/.newsrc.pgp";       
+
+## The news server you want to use 
+$SERVER     = "news.yoursite.com.invalid";	# Default news server
+
+## Where to store the cancel logs?  You'll want to make this directory.
+$CANCELDIR  = "$ENV{'HOME'}/news/pgpmoose/cancels";
+
+# Don't issue the cancels if this is set.
+$TESTING    = 1;				
+
+## Check at most this many articles per run.  
+$ARTS 	    = 200;				
+
+## If the modules are set up in a non-standard place, edit this line 
+## as appropriate.
+# BEGIN { use lib '/home/tskirvin/dev/newslib'; }
+
+###############################################################################
+### main() ####################################################################
+###############################################################################
+
+umask 022;		# Created files should be permissions 777
+require 5;		# Require at least Perl 5
+use strict;		# Good programming is our friend
+use POSIX;		# For reaping functionality; with perl
+use Getopt::Std;	# With perl
+
+$0 =~ s%.*/%%;		# Trim off path information
+$SIG{CHLD} = \&reaper;  # What to do when the children processes die.
+
+## Parse the command-line with Getopt::Std
+
+use vars qw( $GROUP $VERSION $VERBOSE $newsrc %OPTS );
+getopts('hVvts:u:c:g:n:laC:', \%OPTS);
+
+Usage()   if $OPTS{'h'};	# Print usage information and exit
+Version() if $OPTS{'v'};	# Print version information and exit
+
+$LOCALCONF = $OPTS{'C'} if $OPTS{'C'};
+
+# Load local configuration from local configuration file
+if ( -r $LOCALCONF ) { do $LOCALCONF }
+
+$VERBOSE   = $OPTS{'V'} || 0;	
+$TESTING   = $OPTS{'t'} if defined($OPTS{'t'});
+$SERVER    = $OPTS{'S'} if $OPTS{'S'};
+$NEWSRC    = $OPTS{'n'} if $OPTS{'n'};
+
+$GROUP     = $OPTS{'g'};   
+$GROUP     = '.*' if $OPTS{'a'};
+
+$GROUP   ||= "";
+
+# Untaint the newsrc and server values
+if ($NEWSRC =~ /^(\S+)$/) { $NEWSRC = $1 } 
+else { $NEWSRC ? die "Invalid newsrc: '$NEWSRC'\n" : die "No newsrc offered\n" }
+if ($SERVER =~ /^(\S+)$/) { $SERVER = $1 } 
+else { $SERVER ? die "Invalid server: '$SERVER'\n" : die "No server offered\n" }
+
+## Actual work starts
+
+use Net::NNTP;		# NNTP + News functions
+use Net::NNTP::Auth;
+use News::Newsrc;	
+use News::Article::Cancel;
+
+# Load the appropriate newsrc file
+$newsrc = new News::Newsrc;
+$newsrc->load($NEWSRC) or warn "Couldn't open $NEWSRC: $!\n";
+
+# Print the appropriate .newsrc file and exit.
+if ($OPTS{'l'}) {	
+  foreach my $group ( $newsrc->sub_groups ) {
+    print "$group: " , $newsrc->get_articles($group) , "\n";
+  } 
+  foreach my $group ( $newsrc->unsub_groups ) {
+    print "$group! " , $newsrc->get_articles($group) , "\n";
+  } 
+  exit;
+}
+
+# .newsrc manipulation functions - subscribe/unsubscribe/clear a group 
+# Don't go on unless the '-r' option is included 
+my $group;
+if ($group = $OPTS{'s'}) {	
+  $newsrc->subscribe($group) && print "Subscribed to '$group'\n";
+  $newsrc->save;
+  exit();
+} elsif ($group = $OPTS{'u'}) {
+  $newsrc->unsubscribe($group) && print "Unsubscribed from '$group'\n";
+  $newsrc->save;
+  exit();
+} elsif ($group = $OPTS{'c'}) {
+  $newsrc->del_group($group) && $newsrc->add_group($group) && 
+				  print "Cleared '$group'\n";
+  $newsrc->save;
+  exit();
+} 
+
+Usage() unless ($GROUP);
+
+die "No such directory: $CANCELDIR\n" unless (-d $CANCELDIR);
+
+# Connect to $SERVER
+my $NNTP = Net::NNTP->new($SERVER);		
+die "Couldn't connect to server $SERVER" unless $NNTP;
+
+# Authenticate self to the news server.
+my ($user, $pass) = Net::NNTP::Auth->nntpauth($SERVER);
+$NNTP->authinfo( $user, $pass ) if ($user && $pass);
+
+# Go through the subscribed groups 
+my $count = 0;
+LOOP:
+foreach my $group ($newsrc->sub_groups) {
+  next unless ($group =~ /^$GROUP$/i);	# Only check the matching groups
+  my $active = $NNTP->active($group);  
+  next unless $$active{$group};
+  unless (@{$$active{$group}}[2] eq 'm') {	# Group must be moderated
+    print "Unsubscribing from group: $group (not moderated)\n";
+    $newsrc->unsubscribe($group) unless $TESTING;
+    next;
+  } 
+  my ($articles, $firstnum, $lastnum, $name) = $NNTP->group($group);
+  next unless $name;		
+  
+  print "$name: $firstnum - $lastnum (@{[ $newsrc->get_articles($group) ]})\n" 
+			if $VERBOSE;  
+
+  LOOP1:
+  foreach (my $i = $firstnum; $i <= $lastnum; $i++) {
+    next if $newsrc->marked($group, $i);	# Next if it's marked
+    $newsrc->save if ($count++ % 50 == 0);
+    my $article = News::Article::Cancel->new( $NNTP->article($i) );
+    if ($article) {
+      
+      my $response = $article->verify_pgpmoose($group);
+      print "$i: $response\n" if $VERBOSE && $response;
+      
+      unless ($response) {
+	sleep 1;
+        if ($article->verify_resurrected($group)) {
+          print "Article $i was resurrected, ignoring\n" if $VERBOSE;
+          $newsrc->mark($group, $i) unless $TESTING;
+	  sleep 1; next;
+        } 
+        print "Article $i in group $group not verified - cancelling\n";
+        my $from    = $article->header('from') || "";
+        my $subject = $article->header('subject') || "";
+        my $xauth   = $article->header('x-auth') || "";
+        my $mid     = $article->header('message-id') || "";
+        # my $cancel = make_cancel( $article, $NAME, 'moder', 
+        my $cancel = $article->make_cancel( $NAME, 'moder', 
+		"From: $from", "Subject: $subject", "Message-ID: $mid",
+		"X-Auth: $xauth");
+        next unless $cancel;
+        $cancel->write(\*STDOUT);
+        print "\n";
+        if (!$TESTING) {
+          $article->write_unique_file($CANCELDIR) or warn "Couldn't save file: $!\n";
+          $cancel->post( $NNTP );
+	  sleep 1;
+        }
+      }
+    }
+    $newsrc->mark($group, $i) unless $TESTING;
+    last LOOP if ($count >= $ARTS);
+  }
+}
+
+# Quit and Save
+$NNTP->quit;
+$newsrc->save unless $TESTING;
+
+###############################################################################
+### Subroutines ###############################################################
+###############################################################################
+
+### reaper()
+# Kills off the zombie processes
+sub reaper { my $id = waitpid(-1, WNOHANG); }
+
+### Version() 
+# Prints the version number and exits.
+sub Version { warn "$0 v$VERSION\n"; exit(0); }
+
+### Usage()
+# Prints usage information and exits.
+sub Usage {
+  warn <<EOM;
+$0 v$VERSION
+a cancelbot based on PGP signatures in a moderated newsgroup
+Usage: $0 [-hvVt] [-l] [-a] [-sucg group] [-n newsrc] [-S server] 
+
+Reads a moderated newsgroup that uses PGPMoose, and cancels any posts
+that are not signed by the group moderator.  The cancelled articles are
+saved in $CANCELDIR (set by \$CANCELDIR).  
+
+Note that you must configure this program to make it work, either with
+\$LOCALCONF or by modifying this program directly.  This is intentional.
+A sample configuration file is distributed with the program.
+      
+	-h		Print this usage information and exit.
+	-v		Print version information and exit.
+	-V		Verbose mode.  Print information on every article.
+	-t		Testing mode.  Do not actually cancel anything, 
+			  just confirm them for our own satisfaction.
+	-C configfile	Use this configuration file to load extra info
+			  (Default: $LOCALCONF)
+	-n newsrc	.newsrc file from which to load the newsgroups.
+	 		  (Default: $NEWSRC)
+	-S newsserver	Newsserver to connect to 
+			  (Default: $SERVER)
+	-a		Work with all newsgroups
+	-g newsgroup	Only work with this group
+	-s newsgroup	Subscribe to the specified newsgroup 
+	-u newsgroup	Unsubscribe to the specified newsgroup 
+	-c newsgroup	Clear the specified newsgroup 
+EOM
+
+  exit(0);
+}
+
+###############################################################################
+### Documentation #############################################################
+###############################################################################
+
+=head1 NAME
+
+pgpmoose - a cancelbot for policing moderated newsgroups
+
+=head1 SYNOPSIS
+
+  pgpmoose [-hvVt] [-l] [-a] [-sucg group] [-n newsrc] [-S server]
+
+        -h              Print this usage information and exit.
+        -v              Print version information and exit.
+        -V              Verbose mode.  Print information on every article.
+        -t              Testing mode.  Do not actually cancel anything,
+                          just confirm them for our own satisfaction.
+        -n newsrc       .newsrc file from which to load the newsgroups.
+        -S newsserver   Newsserver to connect to 
+        -a              Work with all newsgroups
+        -g newsgroup    Only work with this group
+        -s newsgroup    Subscribe to the specified newsgroup (and exit)
+        -u newsgroup    Unsubscribe to the specified newsgroup (and exit)
+        -c newsgroup    Clear the specified newsgroup (and exit)
+	-C configfile	Use this configuration file instead of $LOCALCONF 
+			  (generally $ENV{'HOME'}/.pgpmooserc)
+
+=head1 DESCRIPTION
+
+pgpmoose is a program that cancels invald messages from moderated
+Usenet groups.  All messages to a specific group are assumed to have a
+PGP signature added at injection by the newsgroup moderator; if no such
+signature exists, or if the signature is invalid for the stated moderator
+of the group, then the message is assumed to be invalid.  This program
+takes care of actually issuing the cancels for those messages.
+
+=head1 NOTES
+
+This is essentially a wrapper for News::Article's verify_pgpmoose() and
+the News::Article::Cancel module.  You shouldn't be running this unless
+you're moderating a newsgroup and have a really good idea of how Usenet
+works.  Really.  Even then, watch the logs carefully, and be prepared for
+a lot of headache.
+
+Note that cancels are tricky things, and I hold no responsiblity for
+what you use this thing for.
+
+You must configure this program to make it work, either with $LOCALCONF
+or by modifying the program directly.  This is intentional.  A sample
+configuration file is distributed with the program; track it down if you
+really want to use it.
+
+=head1 REQUIREMENTS
+
+Perl 5, News::Article::Cancel (which requires News::Article),
+Net::NNTP::Auth (which requires Net::NNTP), News::Newsrc.  Some of these
+modules probably require a Unix system.
+
+=head1 SEE ALSO
+
+B<News::Article::Cancel>, B<News::Article>, B<Net::NNTP::Auth>, the Cancel
+FAQ (B<http://www.killfile.org/faqs/cancel.html>)
+
+Software can be downloaded from
+B<http://www.killfile.org/~tskirvin/software/pgpmoose/>
+
+=head1 AUTHOR
+
+Tim Skirvin <tskirvin@killfile.org>
+
+=head1 LICENSE
+
+This code may be redistributed under the same terms as Perl itself.
+
+The author holds no responsibility for how this program is used, save
+to note that it can probably be misused rather easily; please don't
+do so, though.  
+
+=head1 COPYRIGHT
+
+Copyright 1999-2004, Tim Skirvin <tskirvin@killfile.org>.
+
+=cut
+
+###############################################################################
+### Version History ###########################################################
+###############################################################################
+# v0.9b		Sun Jul  8 14:21:44 CDT 2001
+### First commented, working version.  Not released.
+# v0.91b	Fri Dec 14 10:18:38 CST 2001
+### Fixed the documentation and started distributing.  
+# v1.0		Thu Apr 22 10:10:44 CDT 2004 
+### It's about time to make this a final release.  Now 
